@@ -114,21 +114,32 @@ curl -sf http://localhost:5700/api/time | python3 -m json.tool
 
 ## 6. Install as a systemd service
 
-These steps assume Linux with systemd, the repo checked out to `/opt/FancyClock`, and the service running as user `clock`.
+These steps assume Linux with systemd and the repo checked out to your home directory at `~/FancyClock` (e.g. `/home/cuelight/FancyClock`). The service runs as your own login user and invokes **the Python interpreter from the project's virtualenv** — not the system Python — so Flask and `ntplib` are always resolved from `.venv` regardless of what's installed globally.
 
-### 6a. Place the code
+Throughout this section, replace `cuelight` with your own username if different. You can confirm yours with `whoami` and your home path with `echo $HOME`.
+
+### 6a. Place the code and create the virtualenv
 
 ```bash
-sudo mkdir -p /opt/FancyClock
-sudo chown -R clock:clock /opt/FancyClock
-sudo -u clock git clone http://<your-git-host>/ShowSysDan/FancyClock.git /opt/FancyClock
-sudo -u clock python3 -m venv /opt/FancyClock/.venv
-sudo -u clock /opt/FancyClock/.venv/bin/pip install flask ntplib
+cd ~
+git clone http://<your-git-host>/ShowSysDan/FancyClock.git
+cd ~/FancyClock
+python3 -m venv .venv
+.venv/bin/pip install --upgrade pip
+.venv/bin/pip install flask ntplib
 ```
+
+Confirm the venv's python works before moving on:
+
+```bash
+~/FancyClock/.venv/bin/python ~/FancyClock/ClockServer.py
+```
+
+You should see the startup banner. Press Ctrl+C and continue.
 
 ### 6b. Create the unit file
 
-Save as `/etc/systemd/system/fancyclock.service`:
+Save as `/etc/systemd/system/fancyclock.service` (this path requires `sudo`):
 
 ```ini
 [Unit]
@@ -138,10 +149,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=clock
-Group=clock
-WorkingDirectory=/opt/FancyClock
-ExecStart=/opt/FancyClock/.venv/bin/python3 /opt/FancyClock/ClockServer.py
+User=cuelight
+Group=cuelight
+WorkingDirectory=/home/cuelight/FancyClock
+# IMPORTANT: use the venv's python so Flask/ntplib resolve from .venv,
+# not from the system Python. Absolute paths are required — systemd
+# does not expand ~ or $HOME in unit files.
+ExecStart=/home/cuelight/FancyClock/.venv/bin/python /home/cuelight/FancyClock/ClockServer.py
 Restart=on-failure
 RestartSec=3
 StandardOutput=journal
@@ -151,6 +165,12 @@ StandardError=journal
 WantedBy=multi-user.target
 ```
 
+Notes on the unit file:
+
+- `User=` / `Group=` must match the owner of `~/FancyClock`. systemd will not read files from another user's home by default.
+- `WorkingDirectory=` and `ExecStart=` both use the **absolute** home path — systemd does not expand `~` or `$HOME`.
+- `ExecStart` points at `.venv/bin/python`, not `/usr/bin/python3`. This is what makes the service use the virtualenv.
+
 ### 6c. Enable and start
 
 ```bash
@@ -159,7 +179,15 @@ sudo systemctl enable --now fancyclock.service
 sudo systemctl status fancyclock.service
 ```
 
-### 6d. Watch logs
+### 6d. Verify the service is using the venv
+
+```bash
+systemctl show fancyclock.service -p ExecStart --value
+```
+
+The output should contain `/home/cuelight/FancyClock/.venv/bin/python` — if it shows `/usr/bin/python3` instead, re-edit the unit file and run `sudo systemctl daemon-reload && sudo systemctl restart fancyclock.service`.
+
+### 6e. Watch logs
 
 ```bash
 sudo journalctl -u fancyclock.service -f
@@ -167,11 +195,13 @@ sudo journalctl -u fancyclock.service -f
 
 You should see the startup banner (with port 5700 if you set it) and periodic `NTP sync successful. Offset: ...ms` lines.
 
-### 6e. Update after a `git pull`
+### 6f. Update after a `git pull`
 
 ```bash
-cd /opt/FancyClock
-sudo -u clock git pull origin main
+cd ~/FancyClock
+git pull origin main
+# If dependencies changed:
+.venv/bin/pip install -U flask ntplib
 sudo systemctl restart fancyclock.service
 ```
 
