@@ -976,13 +976,15 @@ BROADCAST_CLOCK_HTML = """
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body {
-    background: radial-gradient(ellipse at center, #5a5a5a 0%, #2a2a2a 100%);
+    background: #050505;
     display: flex;
     align-items: center;
     justify-content: center;
     min-height: 100vh;
   }
-  canvas { display: block; }
+  /* Hidden until we have a confirmed sync with the server.
+     If the server dies, we hide again — we never show local-clock time. */
+  canvas { display: none; }
 </style>
 </head>
 <body>
@@ -993,26 +995,53 @@ const ctx = canvas.getContext('2d');
 
 // ── NTP SYNC (mirrors the / clock's algorithm) ───────────────
 // Keep the canvas render loop authoritative against the server's
-// NTP-synced time rather than the browser's local clock.
+// NTP-synced time rather than the browser's local clock. If the
+// server can no longer be reached, we HIDE the canvas — we must
+// never fall back to the browser's local clock on a broadcast feed.
 let serverTimeOffset = 0;
 let isConnected = false;
 
+function setConnected(state) {
+  if (state === isConnected) return;
+  isConnected = state;
+  canvas.style.display = state ? 'block' : 'none';
+  if (!state) console.warn('Broadcast clock hidden: server unreachable');
+  else        console.log('Broadcast clock visible: sync OK');
+}
+
 async function syncTime() {
   try {
-    const t0 = Date.now();
-    const res = await fetch('/api/time');
-    const t1 = Date.now();
+    const ctrl = new AbortController();
+    const to   = setTimeout(() => ctrl.abort(), 2000);
+    const t0   = Date.now();
+    const res  = await fetch('/api/time', { signal: ctrl.signal });
+    const t1   = Date.now();
+    clearTimeout(to);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
     const data = await res.json();
     // Half-RTT latency compensation, matching the / clock
     const latency = (t1 - t0) / 2;
     serverTimeOffset = (data.timestamp * 1000 + latency) - t1;
-    isConnected = true;
+    setConnected(true);
     console.log('Broadcast clock synced. Offset:', serverTimeOffset, 'ms',
                 data.ntp_synced ? '(NTP)' : '(System)');
   } catch (err) {
-    // Preserve last-known offset on transient failure; clock keeps ticking.
-    isConnected = false;
+    setConnected(false);
     console.warn('Broadcast clock sync failed:', err);
+  }
+}
+
+async function checkHeartbeat() {
+  try {
+    const ctrl = new AbortController();
+    const to   = setTimeout(() => ctrl.abort(), 2000);
+    const res  = await fetch('/api/heartbeat', { signal: ctrl.signal });
+    clearTimeout(to);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    // Came back from a dead state → re-sync before we become visible.
+    if (!isConnected) await syncTime();
+  } catch (err) {
+    setConnected(false);
   }
 }
 
@@ -1029,6 +1058,14 @@ setSize();
 window.addEventListener('resize', setSize);
 
 function draw() {
+  // If we've lost the server, stay hidden and skip rendering entirely —
+  // the canvas is display:none anyway so drawing would be wasted. Keep
+  // the rAF loop alive so we resume instantly on reconnect.
+  if (!isConnected) {
+    requestAnimationFrame(draw);
+    return;
+  }
+
   const W = canvas.width;
   const cx = W / 2, cy = W / 2;
   const R = W / 2 * 0.96;
@@ -1202,8 +1239,9 @@ function draw() {
 // displays browser-local time even for a single frame.
 (async () => {
   await document.fonts.ready;
-  await syncTime();
-  setInterval(syncTime, 10000); // re-sync every 10 s, matches / clock
+  await syncTime();                   // first sync unhides the canvas (or keeps it hidden)
+  setInterval(syncTime,     10000);   // re-sync every 10 s, matches / clock
+  setInterval(checkHeartbeat, 1000);  // 1 s heartbeat — hides on server death, recovers on restart
   requestAnimationFrame(draw);
 })();
 </script>
