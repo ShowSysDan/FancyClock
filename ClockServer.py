@@ -965,6 +965,252 @@ CLOCK_HTML = """
 </html>
 """
 
+BROADCAST_CLOCK_HTML = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Broadcast Clock</title>
+<link href="https://fonts.googleapis.com/css2?family=Rubik:wght@900&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: radial-gradient(ellipse at center, #5a5a5a 0%, #2a2a2a 100%);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+  }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+
+// ── NTP SYNC (mirrors the / clock's algorithm) ───────────────
+// Keep the canvas render loop authoritative against the server's
+// NTP-synced time rather than the browser's local clock.
+let serverTimeOffset = 0;
+let isConnected = false;
+
+async function syncTime() {
+  try {
+    const t0 = Date.now();
+    const res = await fetch('/api/time');
+    const t1 = Date.now();
+    const data = await res.json();
+    // Half-RTT latency compensation, matching the / clock
+    const latency = (t1 - t0) / 2;
+    serverTimeOffset = (data.timestamp * 1000 + latency) - t1;
+    isConnected = true;
+    console.log('Broadcast clock synced. Offset:', serverTimeOffset, 'ms',
+                data.ntp_synced ? '(NTP)' : '(System)');
+  } catch (err) {
+    // Preserve last-known offset on transient failure; clock keeps ticking.
+    isConnected = false;
+    console.warn('Broadcast clock sync failed:', err);
+  }
+}
+
+function getSyncedNow() {
+  return new Date(Date.now() + serverTimeOffset);
+}
+
+function setSize() {
+  const s = Math.min(window.innerWidth, window.innerHeight) * 0.88;
+  canvas.width = s;
+  canvas.height = s;
+}
+setSize();
+window.addEventListener('resize', setSize);
+
+function draw() {
+  const W = canvas.width;
+  const cx = W / 2, cy = W / 2;
+  const R = W / 2 * 0.96;
+
+  ctx.clearRect(0, 0, W, W);
+
+  const now   = getSyncedNow();
+  const hours   = now.getHours();
+  const minutes = now.getMinutes();
+  const seconds = now.getSeconds();
+  const ms      = now.getMilliseconds();
+
+  // Fraction through current second → drives CCW sweep
+  const frac = ms / 1000;
+
+  // ── OUTER DROP SHADOW ──────────────────────────────────────
+  ctx.save();
+  ctx.shadowColor = 'rgba(0,0,0,0.7)';
+  ctx.shadowBlur  = W * 0.07;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  ctx.fillStyle = '#111';
+  ctx.fill();
+  ctx.restore();
+
+  // ── BEZEL BASE ────────────────────────────────────────────
+  ctx.beginPath();
+  ctx.arc(cx, cy, R, 0, Math.PI * 2);
+  const bezelGrad = ctx.createLinearGradient(cx - R, cy - R, cx + R, cy + R);
+  bezelGrad.addColorStop(0,   '#2e2e2e');
+  bezelGrad.addColorStop(0.5, '#1a1a1a');
+  bezelGrad.addColorStop(1,   '#0e0e0e');
+  ctx.fillStyle = bezelGrad;
+  ctx.fill();
+
+  // ── TICK MARKS & LABELS ───────────────────────────────────
+  const tickOuterR = R * 0.97;
+  const tickInnerR = R * 0.895; // uniform length for all ticks
+  const labelR     = R * 0.815; // sits in bezel band between tick inner and copper ring
+
+  // Simple broadcast mode: one tick lights per second, fills clockwise, clears every minute
+  for (let i = 0; i < 60; i++) {
+    const angle  = -Math.PI / 2 + (i / 60) * Math.PI * 2;
+    const innerR = tickInnerR;
+
+    const x1 = cx + Math.cos(angle) * tickOuterR;
+    const y1 = cy + Math.sin(angle) * tickOuterR;
+    const x2 = cx + Math.cos(angle) * innerR;
+    const y2 = cy + Math.sin(angle) * innerR;
+
+    const lit = i === 0 || (i > 0 && i <= seconds); // tick 0 always on; 1–59 fill per second
+
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.lineWidth   = W * 0.005;
+    ctx.lineCap     = 'round';
+    ctx.strokeStyle = lit ? '#ff8800' : '#3a3a3a';
+    ctx.stroke();
+  }
+
+  // ── INNER TICK SEPARATOR RING ────────────────────────────
+  ctx.beginPath();
+  ctx.arc(cx, cy, tickInnerR - R * 0.008, 0, Math.PI * 2);
+  ctx.strokeStyle = '#b8722a';
+  ctx.lineWidth   = R * 0.018;
+  ctx.stroke();
+
+  // Labels — always static copper
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.font         = `bold ${W * 0.038}px Rubik, sans-serif`;
+  ctx.fillStyle    = '#c08040';
+  ctx.shadowBlur   = 0;
+
+  for (let i = 5; i <= 60; i += 5) {
+    const angle = -Math.PI / 2 + (i / 60) * Math.PI * 2;
+    const nx = cx + Math.cos(angle) * labelR;
+    const ny = cy + Math.sin(angle) * labelR;
+    ctx.fillText(i === 60 ? '60' : String(i), nx, ny);
+  }
+
+  // ── DARK SEPARATOR RING (face edge) ──────────────────────
+  const faceR = R * 0.73;
+  ctx.beginPath();
+  ctx.arc(cx, cy, faceR + R * 0.018, 0, Math.PI * 2);
+  ctx.strokeStyle = '#222222';
+  ctx.lineWidth   = R * 0.007;
+  ctx.shadowBlur  = 0;
+  ctx.stroke();
+
+  // ── FACE ──────────────────────────────────────────────────
+  ctx.beginPath();
+  ctx.arc(cx, cy, faceR, 0, Math.PI * 2);
+  ctx.fillStyle = '#080808';
+  ctx.fill();
+
+  // Red glow — lower hemisphere, grows redder as seconds progress
+  const redIntensity = 0.55 + (seconds / 60) * 0.3;
+  const redGrad = ctx.createRadialGradient(cx, cy + faceR * 0.45, faceR * 0.05,
+                                           cx, cy + faceR * 0.45, faceR * 1.1);
+  redGrad.addColorStop(0,   `rgba(160,0,0,${redIntensity})`);
+  redGrad.addColorStop(0.45, `rgba(80,0,0,${redIntensity * 0.6})`);
+  redGrad.addColorStop(1,    'rgba(0,0,0,0)');
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, faceR, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.fillStyle = redGrad;
+  ctx.fillRect(cx - faceR, cy - faceR, faceR * 2, faceR * 2);
+  ctx.restore();
+
+  // Top dark vignette on face
+  const topVig = ctx.createRadialGradient(cx, cy - faceR * 0.2, 0, cx, cy, faceR);
+  topVig.addColorStop(0,   'rgba(0,0,0,0.65)');
+  topVig.addColorStop(0.55,'rgba(0,0,0,0.1)');
+  topVig.addColorStop(1,   'rgba(0,0,0,0)');
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(cx, cy, faceR, 0, Math.PI * 2);
+  ctx.clip();
+  ctx.fillStyle = topVig;
+  ctx.fillRect(cx - faceR, cy - faceR, faceR * 2, faceR * 2);
+  ctx.restore();
+
+  // ── TIME DISPLAY (fixed positions per segment to prevent shifting) ────
+  const pad = n => String(n).padStart(2, '0');
+  const fs = W * 0.115;
+  ctx.font         = `900 ${fs}px Rubik, sans-serif`;
+  ctx.textAlign    = 'center';
+  ctx.textBaseline = 'middle';
+
+  // Measure a reference digit width for layout
+  const dw  = ctx.measureText('0').width;   // single digit
+  const cw  = ctx.measureText(':').width;   // colon
+  const segW = dw * 2;                       // two-digit segment width
+
+  // Total width: HH + : + MM + : + SS
+  const totalW = segW + cw + segW + cw + segW;
+  const startX = cx - totalW / 2;
+
+  function drawSeg(text, x) {
+    // glow pass
+    ctx.shadowColor = 'rgba(255,255,255,0.35)';
+    ctx.shadowBlur  = W * 0.03;
+    ctx.fillStyle   = '#ffffff';
+    ctx.fillText(text, x, cy);
+    // crisp pass
+    ctx.shadowBlur = 0;
+    ctx.fillStyle  = '#f0ead8';
+    ctx.fillText(text, x, cy);
+  }
+
+  const hhX = startX + segW / 2;
+  const c1X = startX + segW + cw / 2;
+  const mmX = startX + segW + cw + segW / 2;
+  const c2X = startX + segW + cw + segW + cw / 2;
+  const ssX = startX + segW + cw + segW + cw + segW / 2;
+
+  drawSeg(pad(hours),   hhX);
+  drawSeg(':',          c1X);
+  drawSeg(pad(minutes), mmX);
+  drawSeg(':',          c2X);
+  drawSeg(pad(seconds), ssX);
+
+  requestAnimationFrame(draw);
+}
+
+// Gate the first paint on an NTP sync so the broadcast clock never
+// displays browser-local time even for a single frame.
+(async () => {
+  await document.fonts.ready;
+  await syncTime();
+  setInterval(syncTime, 10000); // re-sync every 10 s, matches / clock
+  requestAnimationFrame(draw);
+})();
+</script>
+</body>
+</html>
+"""
+
 SETTINGS_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -1702,6 +1948,11 @@ def index():
     """Serve the main clock display"""
     return render_template_string(CLOCK_HTML)
 
+@app.route('/broadcast')
+def broadcast():
+    """Serve the broadcast-style clock display (second output)"""
+    return render_template_string(BROADCAST_CLOCK_HTML)
+
 @app.route('/settings')
 def settings_page():
     """Serve the settings page"""
@@ -1759,6 +2010,7 @@ if __name__ == '__main__':
     print("         ULTIMATE PROFESSIONAL DIGITAL CLOCK SERVER")
     print("=" * 70)
     print(f"  Clock display:  http://localhost:{PORT}")
+    print(f"  Broadcast clock: http://localhost:{PORT}/broadcast")
     print(f"  Settings page:  http://localhost:{PORT}/settings")
     print(f"  Settings file:  {SETTINGS_FILE}")
     if NTP_AVAILABLE:
